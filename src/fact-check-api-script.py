@@ -1,73 +1,96 @@
 from datetime import datetime
 import requests
 import os
+import json
 
 # --- 1. Parâmetros e configuração ---
 
-# Palavra-chave a ser pesquisada
-query = "vacina"
-
-# Código do idioma (português Brasil)
+query = "água"
 language_code = "pt-BR"
-
-# Tamanho da página (máx. 100)
-page_size = 10
-
-# Chave da API (use variável de ambiente por segurança)
+page_size = 100
 API_KEY = os.getenv("FACT_CHECK_API_KEY", "SUA_CHAVE_AQUI")
 
-# URL base da API
 base_url = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
 
-# Parâmetros da requisição
-params = {
-    "query": query,
-    "languageCode": language_code,
-    "pageSize": page_size,
-    "key": API_KEY
-}
+# Arquivos para salvar
+ARQUIVO_DADOS = "dados_novos.json"
+ARQUIVO_HISTORICO = "historico_urls.json"
+ARQUIVO_LOG = "log_coleta.txt"
 
-# --- 2. Função para extrair e imprimir os dados ---
+# --- 2. Carregar histórico existente (ou criar vazio) ---
+if os.path.exists(ARQUIVO_HISTORICO):
+    with open(ARQUIVO_HISTORICO, "r", encoding="utf-8") as f:
+        historico_urls = set(json.load(f))
+else:
+    historico_urls = set()
 
+# --- 3. Função de busca com paginação e filtro por duplicatas ---
 def buscar_claims():
-    response = requests.get(base_url, params=params)
+    pagina = 1
+    novas_claims = []
+    total_requisicoes = 0
+    next_page_token = None
 
-    if response.status_code == 200:
+    while True:
+        print(f"🔄 Página {pagina}...")
+
+        params = {
+            "query": query,
+            "languageCode": language_code,
+            "pageSize": page_size,
+            "key": API_KEY
+        }
+
+        if next_page_token:
+            params["pageToken"] = next_page_token
+
+        response = requests.get(base_url, params=params)
+        total_requisicoes += 1
+
+        if response.status_code != 200:
+            print("❌ Erro:", response.status_code)
+            print(response.text)
+            break
+
         dados = response.json()
         claims = dados.get("claims", [])
-        print(f"\n✅ {len(claims)} resultados encontrados para '{query}'\n")
+        next_page_token = dados.get("nextPageToken")
 
-        for i, claim in enumerate(claims, 1):
-            texto = claim.get("text", "sem texto")
-            autor = claim.get("claimant", "autor desconhecido")
-            data_afirmacao = claim.get("claimDate", "sem data")
+        novos_encontrados = 0
+
+        for claim in claims:
             checagem = claim.get("claimReview", [{}])[0]
+            url = checagem.get("url", "")
 
-            agencia = checagem.get("publisher", {}).get("name", "desconhecida")
-            titulo = checagem.get("title", "sem título")
-            link = checagem.get("url", "sem link")
-            classificacao = checagem.get("textualRating", "sem classificação")
+            if url and url not in historico_urls:
+                novas_claims.append(claim)
+                historico_urls.add(url)
+                novos_encontrados += 1
 
-            print(f"🧾 Resultado {i}")
-            print(f"🔹 Afirmação: {texto}")
-            print(f"👤 Autor: {autor}")
-            print(f"📅 Data: {data_afirmacao}")
-            print(f"🏷️ Classificação: {classificacao}")
-            print(f"🏢 Agência: {agencia}")
-            print(f"📖 Título: {titulo}")
-            print(f"🔗 Link: {link}\n")
+        print(f"✅ {novos_encontrados} novos resultados na página {pagina}")
 
-        # Gera log da busca
-        with open("log_coleta.txt", "a", encoding="utf-8") as log:
-            log.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Busca por '{query}' retornou {len(claims)} resultados.\n")
+        if not next_page_token:
+            break
 
+        pagina += 1
+
+    # Salvar os novos dados (se houver)
+    if novas_claims:
+        with open(ARQUIVO_DADOS, "w", encoding="utf-8") as f:
+            json.dump(novas_claims, f, ensure_ascii=False, indent=4)
+
+        with open(ARQUIVO_HISTORICO, "w", encoding="utf-8") as f:
+            json.dump(list(historico_urls), f, ensure_ascii=False, indent=2)
+
+        with open(ARQUIVO_LOG, "a", encoding="utf-8") as log:
+            log.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {len(novas_claims)} novos registros adicionados para '{query}'\n")
+
+        print(f"\n📝 {len(novas_claims)} novas checagens salvas em '{ARQUIVO_DADOS}'")
     else:
-        print("❌ Erro na requisição:", response.status_code)
-        print(response.text)
+        print("\n📦 Nenhuma nova checagem encontrada.")
 
-# --- 3. Execução ---
-
+# --- 4. Execução ---
 if __name__ == "__main__":
-    coleta = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n📆 Coleta realizada em: {coleta}")
+    print(f"\n📅 Coleta iniciada em: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     buscar_claims()
+
